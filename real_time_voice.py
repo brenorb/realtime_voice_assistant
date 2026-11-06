@@ -78,9 +78,12 @@ class AudioOut:
 
     async def stop(self):
         # Stop and close the audio output stream
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
+        stream, self.stream = self.stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
 
 # Class to handle the main audio streaming functionality
 class AudioStreamer:
@@ -128,24 +131,23 @@ class AudioStreamer:
                 }
             }))
 
-            # Start tasks for receiving events and playing audio
-            receive_task = asyncio.create_task(self.receive_events(ws))
-            play_task = asyncio.create_task(self.audio_out.start())
+            self.should_record = True
+            tasks = (
+                asyncio.create_task(self.receive_events(ws)),
+                asyncio.create_task(self.audio_out.start()),
+                asyncio.create_task(self.send_audio(ws)),
+            )
 
             try:
-                # Main loop for sending audio
-                while True:
-                    self.should_record = True
-                    await self.send_audio(ws)
-                    await asyncio.sleep(0.1)
-            except KeyboardInterrupt:
-                # Handle graceful shutdown on keyboard interrupt
-                print("\nExiting...")
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
+            finally:
                 self.should_record = False
-                receive_task.cancel()
-                play_task.cancel()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
                 await self.audio_out.stop()
-                await ws.close()
 
     async def send_audio(self, ws):
         # Function to send audio data to the API
@@ -154,6 +156,8 @@ class AudioStreamer:
 
         def callback(indata, frames, time, status):
             # Callback function for audio input
+            if not self.should_record:
+                return
             if status:
                 print(status, flush=True)
             audio_bytes = indata.tobytes()
